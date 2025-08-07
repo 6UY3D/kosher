@@ -14,7 +14,8 @@ mod xrpl_witness;
 mod errors;
 mod config;
 mod api;
-mod validator; // New validator module
+mod validator;
+mod persistence; // New persistence module
 
 use config::Config;
 use errors::NodeError;
@@ -28,7 +29,7 @@ async fn main() -> Result<(), NodeError> {
     let config = Config::load("config.toml")?;
     println!("[Main] Configuration loaded successfully.");
 
-    // --- 2. Initialize State from Config ---
+    // --- 2. Initialize or Load State ---
     let validators_content = fs::read_to_string(&config.chain.validators_file)?;
     let validators_data: HashMap<String, Vec<String>> = serde_json::from_str(&validators_content)?;
     let validator_set: HashSet<String> = validators_data.get("validators")
@@ -36,8 +37,9 @@ async fn main() -> Result<(), NodeError> {
         .iter()
         .cloned()
         .collect();
-
-    let blockchain = Arc::new(Mutex::new(blockchain::Blockchain::new(validator_set.clone())));
+    
+    // Load existing state from disk or create a new one.
+    let blockchain = Arc::new(Mutex::new(persistence::load_or_initialize_state(validator_set.clone())?));
     let mempool = Arc::new(Mutex::new(mempool::Mempool::new()));
     let peer_manager = Arc::new(Mutex::new(p2p::PeerManager::default()));
 
@@ -54,17 +56,33 @@ async fn main() -> Result<(), NodeError> {
     // P2P Network Task
     let p2p_task = tokio::spawn(p2p::run_p2p_network(config.p2p, blockchain.clone(), mempool.clone(), peer_manager.clone(), p2p_rx));
     println!("[Main] P2P service task spawned.");
+    
+    // ... other tasks ...
 
-    // XRPL Witness Task
-    let witness_task = tokio::spawn(xrpl_witness::run_xrpl_witness(config.witness));
-    println!("[Main] XRPL Witness service task spawned.");
-
-    // --- 5. Conditional Validator Service ---
-    if let Some(validator_config) = config.validator {
-        println!("[Main] Validator config found. Attempting to start validator service...");
-        let validator_wallet = Wallet::load_or_create(Path::new(&validator_config.key_file))?;
-        
-        if validator_set.contains(&validator_wallet.public_key_hex()) {
+    // --- 5. Graceful Shutdown ---
+    match signal::ctrl_c().await {
+        Ok(()) => {
+            println!("\n[Main] Ctrl-C received. Shutting down node gracefully...");
+            
+            // Save the final state before exiting.
+            if let Err(e) = persistence::save_state(&blockchain.lock().unwrap()) {
+                eprintln!("[Main] CRITICAL: Failed to save state on shutdown: {}", e);
+            } else {
+                println!("[Main] Final state saved successfully.");
+            }
+            
+            api_task.abort();
+            p2p_task.abort();
+            // Abort other tasks...
+            println!("[Main] All services stopped.");
+        }
+        Err(err) => {
+            eprintln!("[Main] Unable to listen for shutdown signal: {}", err);
+        }
+    }
+    
+    Ok(())
+}        if validator_set.contains(&validator_wallet.public_key_hex()) {
             println!("[Main] ✅ Wallet public key is in the official validator set.");
             let validator_service = validator::ValidatorService::new(
                 validator_wallet,
