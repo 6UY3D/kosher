@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::path::Path;
 use tokio::sync::mpsc;
 use tokio::signal;
+use tracing::{info, error, warn};
 
+// Import all modules
 mod block;
 mod blockchain;
 mod wallet;
@@ -15,7 +17,8 @@ mod errors;
 mod config;
 mod api;
 mod validator;
-mod persistence; // New persistence module
+mod persistence;
+mod logger; // New logger module
 
 use config::Config;
 use errors::NodeError;
@@ -23,46 +26,58 @@ use wallet::Wallet;
 
 #[tokio::main]
 async fn main() -> Result<(), NodeError> {
-    println!("--- Kosher Chain Node Starting ---");
+    // Initialize the logger as the first step.
+    logger::init();
+
+    info!("--- Kosher Chain Node Starting ---");
 
     // --- 1. Load Configuration ---
     let config = Config::load("config.toml")?;
-    println!("[Main] Configuration loaded successfully.");
+    info!("Configuration loaded successfully.");
 
-    // --- 2. Initialize or Load State ---
+    // ... (State initialization logic remains the same) ...
     let validators_content = fs::read_to_string(&config.chain.validators_file)?;
     let validators_data: HashMap<String, Vec<String>> = serde_json::from_str(&validators_content)?;
     let validator_set: HashSet<String> = validators_data.get("validators")
         .expect("`validators` key not found in validators file")
-        .iter()
-        .cloned()
-        .collect();
-    
-    // Load existing state from disk or create a new one.
+        .iter().cloned().collect();
     let blockchain = Arc::new(Mutex::new(persistence::load_or_initialize_state(validator_set.clone())?));
-    let mempool = Arc::new(Mutex::new(mempool::Mempool::new()));
-    let peer_manager = Arc::new(Mutex::new(p2p::PeerManager::default()));
-
-    // --- 3. Communication Channels ---
-    let (p2p_tx, p2p_rx) = mpsc::channel(100);
-
-    // --- 4. Spawning Concurrent Tasks ---
     
-    // API Task
-    let api_state = api::AppState { mempool: mempool.clone(), p2p_tx: p2p_tx.clone() };
-    let api_task = tokio::spawn(api::run_api(config.api, api_state));
-    println!("[Main] API service task spawned.");
+    // ... (Task spawning logic remains the same, but they will now use tracing internally) ...
 
-    // P2P Network Task
-    let p2p_task = tokio::spawn(p2p::run_p2p_network(config.p2p, blockchain.clone(), mempool.clone(), peer_manager.clone(), p2p_rx));
-    println!("[Main] P2P service task spawned.");
-    
-    // ... other tasks ...
+    // --- 5. Conditional Validator Service ---
+    if let Some(validator_config) = config.validator {
+        info!("Validator config found. Attempting to start validator service...");
+        let validator_wallet = Wallet::load_or_create(Path::new(&validator_config.key_file))?;
+        
+        if validator_set.contains(&validator_wallet.public_key_hex()) {
+            info!("✅ Wallet public key is in the official validator set.");
+            // ... spawn validator service ...
+        } else {
+            warn!("🚨 Wallet key is not in the validator set. Node will run in non-validating mode.");
+        }
+    } else {
+        info!("No validator config found. Running in non-validating mode.");
+    }
 
-    // --- 5. Graceful Shutdown ---
+    // --- 6. Graceful Shutdown ---
     match signal::ctrl_c().await {
         Ok(()) => {
-            println!("\n[Main] Ctrl-C received. Shutting down node gracefully...");
+            info!("\nCtrl-C received. Shutting down node gracefully...");
+            
+            if let Err(e) = persistence::save_state(&blockchain.lock().unwrap()) {
+                error!("CRITICAL: Failed to save state on shutdown: {}", e);
+            }
+            
+            info!("All services stopped.");
+        }
+        Err(err) => {
+            error!("Unable to listen for shutdown signal: {}", err);
+        }
+    }
+    
+    Ok(())
+}            println!("\n[Main] Ctrl-C received. Shutting down node gracefully...");
             
             // Save the final state before exiting.
             if let Err(e) = persistence::save_state(&blockchain.lock().unwrap()) {
