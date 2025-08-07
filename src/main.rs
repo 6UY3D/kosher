@@ -1,35 +1,51 @@
-// Declare the block module
 mod block;
+mod blockchain;
 
-use block::{Block, BlockHeader, Transaction};
-use chrono::Utc;
+use block::Transaction;
+use blockchain::Blockchain;
+
+const CHAIN_FILE: &str = "chain.json";
 
 fn main() {
-    // Create some dummy transactions for the genesis block
-    let transactions = vec![
+    // Load the blockchain from disk, or create it if it doesn't exist.
+    let mut kosher_chain = Blockchain::load_from_file(CHAIN_FILE);
+
+    println!("--- Kosher Chain: Phase 2 ---");
+    println!("Blockchain loaded successfully. Current block count: {}", kosher_chain.blocks.len());
+
+    // Let's create a new transaction and add a new block.
+    // In a real system, the validator would be a cryptographic public key.
+    let new_transactions = vec![
         Transaction {
-            sender: "system".to_string(),
-            recipient: "rabbi_A".to_string(),
-            amount: 1000.0, // Initial allocation
+            sender: "rabbi_A".to_string(),
+            recipient: "rabbi_B".to_string(),
+            amount: 50.0,
+        },
+        Transaction {
+            sender: "community_fund".to_string(),
+            recipient: "charity_xyz".to_string(),
+            amount: 180.0,
         },
     ];
 
-    // The genesis block has an ID of 0 and no previous hash.
-    let genesis_block = Block {
-        header: BlockHeader {
-            id: 0,
-            timestamp: Utc::now().timestamp(),
-            previous_hash: "0".repeat(64), // A string of 64 zeros
-            validator: "system".to_string(),
-            transactions_hash: Block::hash_transactions(&transactions),
-        },
-        transactions,
-    };
+    println!("\nAdding a new block with {} transactions...", new_transactions.len());
+    kosher_chain.add_block(new_transactions, "validator_node_1".to_string());
+    
+    println!("New block added successfully!");
+    println!("Current block count: {}", kosher_chain.blocks.len());
+    
+    // Print the latest block
+    if let Some(latest_block) = kosher_chain.blocks.last() {
+        println!("\nLatest Block Details:");
+        println!("{:#?}", latest_block);
+        println!("Latest Block Hash: {}", latest_block.calculate_hash());
+    }
 
-    let genesis_hash = genesis_block.calculate_hash();
-
-    println!("--- Kosher Chain: Phase 1 ---");
-    println!("Genesis Block created successfully!");
-    println!("{:#?}", genesis_block);
-    println!("Genesis Block Hash: {}", genesis_hash);
+    // Save the updated blockchain state to disk.
+    println!("\nSaving blockchain state to '{}'...", CHAIN_FILE);
+    if let Err(e) = kosher_chain.save_to_file(CHAIN_FILE) {
+        eprintln!("Error saving blockchain: {}", e);
+    } else {
+        println!("Save successful.");
+    }
 }
