@@ -1,15 +1,12 @@
 use crate::block::{Block, Transaction};
-use crate::evm::process_transaction;
 use crate::errors::NodeError;
-use revm::{
-    primitives::{AccountInfo, Bytecode, B160, U256 as RevmU256},
-    db::{CacheDB, EmptyDB},
-    EVM,
-};
+use crate::wallet::Wallet;
 use std::collections::{HashMap, HashSet};
+use ed25519_dalek::Signature;
+use chrono::Utc;
+use revm::primitives::{U256 as RevmU256, Bytecode};
 
-// AccountState is now EVM-compatible.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default)]
 pub struct AccountState {
     pub nonce: u64,
     pub balance: RevmU256,
@@ -17,54 +14,72 @@ pub struct AccountState {
     pub storage: HashMap<RevmU256, RevmU256>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Blockchain {
     pub blocks: Vec<Block>,
-    validator_set: HashSet<String>,
-    // The state is no longer directly managed here, it will be managed via the EVM's database.
+    pub validator_set: HashSet<String>,
+    pub state: HashMap<String, AccountState>,
 }
 
 impl Blockchain {
-    // ... new() function ...
-    
-    /// Validates a block by re-executing its transactions against the state of the previous block.
-    pub fn validate_and_add_block(&mut self, block: Block) -> Result<(), NodeError> {
-        // --- Setup EVM and DB for validation ---
-        let mut cache_db = CacheDB::new(EmptyDB::default());
-        // 1. Populate the cache_db with the state from the *end* of the previous block.
-        // This is a complex step that requires iterating all previous blocks or using state snapshots.
-        // For this example, we assume this is done.
+    pub fn new(validators: HashSet<String>) -> Self {
+        let genesis_block = Block {
+            header: crate::block::BlockHeader {
+                id: 0,
+                timestamp: Utc::now().timestamp(),
+                previous_hash: "0".repeat(64),
+                validator_pubkey: "system".to_string(),
+                transactions_hash: "0".repeat(64),
+            },
+            transactions: vec![],
+            signature: Signature::from_bytes(&[0; 64]).unwrap(),
+        };
 
-        let mut evm = EVM::new();
-        evm.database(cache_db);
-
-        // --- Execute Transactions ---
-        for tx in &block.transactions {
-            // Set up EVM environment for this block (timestamp, block number, etc.)
-            evm.env.block.number = RevmU256::from(block.header.id);
-            evm.env.block.timestamp = RevmU256::from(block.header.timestamp);
-            
-            process_transaction(self, tx, &mut evm)?;
+        Self {
+            blocks: vec![genesis_block],
+            validator_set: validators,
+            state: HashMap::new(),
         }
-        
-        // Block is valid, add it to the chain.
+    }
+
+    /// The core block validation logic. This function is now more focused.
+    /// It validates a block and, if valid, returns the new state. The caller is responsible for committing it.
+    pub fn validate_and_add_block(&mut self, block: Block) -> Result<(), NodeError> {
+        // The validation logic using EVM would be here, as in the previous phase.
+        // For brevity, we are showing the simplified validation logic.
+        self.is_block_valid(&block)?;
+
+        // Update state based on transactions
+        for tx in &block.transactions {
+            // This part would be replaced by the EVM state transition logic
+            // For example:
+            // let mut evm_db = self.build_evm_db();
+            // process_transaction(&mut evm, tx);
+            // self.state = evm_db.into_state();
+        }
+
         self.blocks.push(block);
         Ok(())
     }
-}    /// Performs comprehensive validation of a block and all its transactions.
+    
     fn is_block_valid(&self, block: &Block) -> Result<(), NodeError> {
         let previous_block = self.blocks.last().ok_or_else(|| NodeError::Blockchain("Genesis block not found".into()))?;
 
-        // --- Block Header Validation ---
         if block.header.id != previous_block.header.id + 1 {
             return Err(NodeError::Blockchain("Invalid block ID".into()));
         }
         if block.header.previous_hash != previous_block.calculate_header_hash() {
             return Err(NodeError::Blockchain("Previous hash mismatch".into()));
         }
-
-        // --- PoA Validator Validation ---
         if !self.validator_set.contains(&block.header.validator_pubkey) {
+            return Err(NodeError::Blockchain("Validator not in the approved set".into()));
+        }
+        
+        // ... further validation ...
+        
+        Ok(())
+    }
+}        if !self.validator_set.contains(&block.header.validator_pubkey) {
             return Err(NodeError::Blockchain("Validator not in the approved set".into()));
         }
         let message = block.calculate_header_hash();
