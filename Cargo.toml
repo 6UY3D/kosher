@@ -17,3 +17,4 @@ once_cell = "1.19"
 axum = "0.7"
 # We also need to add the "full" feature to tokio if not already present
 tokio = { version = "1", features = ["full"] }
+xrpl-rust = "0.3"
