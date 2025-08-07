@@ -1,42 +1,90 @@
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey, Signature};
-use rand::rngs::OsRng;
-use std::convert::TryInto;
+mod block;
+mod blockchain;
+mod wallet;
 
-// A wallet holds the cryptographic keypair needed to sign data.
-pub struct Wallet {
-    keypair: SigningKey,
-}
+use block::{Block, BlockHeader, Transaction};
+use blockchain::Blockchain;
+use wallet::Wallet;
+use std::collections::HashSet;
 
-impl Wallet {
-    /// Creates a new wallet with a fresh keypair.
-    pub fn new() -> Self {
-        let mut csprng = OsRng;
-        let keypair = SigningKey::generate(&mut csprng);
-        Self { keypair }
+const CHAIN_FILE: &str = "chain.json";
+
+fn main() {
+    println!("--- Kosher Chain: Phase 3 ---");
+
+    // 1. Create wallets for the Rabbinic Council validators
+    let rabbi_a_wallet = Wallet::new();
+    let rabbi_b_wallet = Wallet::new();
+    let council_member_c_wallet = Wallet::new();
+    let unauthorized_wallet = Wallet::new(); // An outsider
+
+    // 2. Define the authorized validator set using their public keys
+    let mut validator_set = HashSet::new();
+    validator_set.insert(rabbi_a_wallet.public_key_hex());
+    validator_set.insert(rabbi_b_wallet.public_key_hex());
+    validator_set.insert(council_member_c_wallet.public_key_hex());
+
+    println!("Authorized Validators (Public Keys):");
+    for v in &validator_set {
+        println!("- {}", v);
     }
 
-    /// Signs a given message (e.g., a block hash).
-    pub fn sign(&self, message: &[u8]) -> Signature {
-        self.keypair.sign(message)
+    // 3. Load or create the blockchain with the validator set
+    let mut kosher_chain = Blockchain::load_from_file(CHAIN_FILE, validator_set);
+    println!("\nBlockchain loaded. Current block count: {}", kosher_chain.blocks.len());
+
+    // 4. A valid validator (Rabbi A) creates a new block
+    println!("\nAttempting to add a block by an authorized validator (Rabbi A)...");
+    
+    let new_transactions = vec![Transaction { sender: "a".into(), recipient: "b".into(), amount: 10.0 }];
+    let previous_block = kosher_chain.blocks.last().unwrap();
+
+    let mut valid_block = Block {
+        header: BlockHeader {
+            id: previous_block.header.id + 1,
+            timestamp: chrono::Utc::now().timestamp(),
+            previous_hash: previous_block.calculate_header_hash(),
+            validator_pubkey: rabbi_a_wallet.public_key_hex(),
+            transactions_hash: Block::hash_transactions(&new_transactions),
+        },
+        transactions: new_transactions,
+        signature: Signature::from_bytes(&[0; 64]).unwrap(), // Dummy signature for now
+    };
+    let block_hash = valid_block.calculate_header_hash();
+    valid_block.signature = rabbi_a_wallet.sign(block_hash.as_bytes());
+
+    match kosher_chain.add_block(valid_block) {
+        Ok(_) => println!("✅ SUCCESS: Block added by Rabbi A."),
+        Err(e) => eprintln!("❌ FAILURE: {}", e),
     }
 
-    /// Returns the public key as a hex string for identification.
-    pub fn public_key_hex(&self) -> String {
-        hex::encode(self.keypair.verifying_key().to_bytes())
+    // 5. An unauthorized person attempts to create a block
+    println!("\nAttempting to add a block by an unauthorized person...");
+
+    let rogue_transactions = vec![Transaction { sender: "x".into(), recipient: "y".into(), amount: 99.0 }];
+    let previous_block = kosher_chain.blocks.last().unwrap();
+
+    let mut rogue_block = Block {
+        header: BlockHeader {
+            id: previous_block.header.id + 1,
+            timestamp: chrono::Utc::now().timestamp(),
+            previous_hash: previous_block.calculate_header_hash(),
+            validator_pubkey: unauthorized_wallet.public_key_hex(),
+            transactions_hash: Block::hash_transactions(&rogue_transactions),
+        },
+        transactions: rogue_transactions,
+        signature: Signature::from_bytes(&[0; 64]).unwrap(),
+    };
+    let rogue_hash = rogue_block.calculate_header_hash();
+    rogue_block.signature = unauthorized_wallet.sign(rogue_hash.as_bytes());
+
+    match kosher_chain.add_block(rogue_block) {
+        Ok(_) => println!("✅ SUCCESS: Block added by rogue actor."),
+        Err(e) => eprintln!("❌ FAILURE: {}. Block was correctly rejected.", e),
     }
 
-    /// Verifies a signature given a public key, the original message, and the signature.
-    pub fn verify_signature(public_key_hex: &str, message: &[u8], signature: &Signature) -> bool {
-        let pubkey_bytes = match hex::decode(public_key_hex) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
-        };
-        let pubkey_array: [u8; 32] = match pubkey_bytes.try_into() {
-            Ok(arr) => arr,
-            Err(_) => return false,
-        };
-        let public_key = VerifyingKey::from_bytes(&pubkey_array).expect("Failed to create public key");
-        
-        public_key.verify_strict(message, signature).is_ok()
-    }
+    println!("\nFinal block count: {}", kosher_chain.blocks.len());
+
+    // Save the updated chain
+    kosher_chain.save_to_file(CHAIN_FILE).unwrap();
 }
