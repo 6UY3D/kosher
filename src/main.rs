@@ -1,10 +1,9 @@
-// A placeholder for the full main.rs which would integrate all modules.
-// Due to the complexity, this is a structural skeleton.
-// You would merge the logic from the P2P, API, and Witness phases here.
+use std::collections::{HashSet, HashMap};
+use std::fs;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio::signal;
 
-// Import modules
 mod block;
 mod blockchain;
 mod wallet;
@@ -12,59 +11,63 @@ mod p2p;
 mod mempool;
 mod xrpl_witness;
 mod errors;
+mod config;
+
+use config::Config;
+use errors::NodeError;
 
 #[tokio::main]
-async fn main() -> Result<(), errors::NodeError> {
+async fn main() -> Result<(), NodeError> {
     println!("--- Kosher Chain Node Starting ---");
 
-    // --- 1. Shared State Initialization ---
-    // In a real app, this would be loaded from config/disk.
-    let validator_set = std::collections::HashSet::new(); // Populate this from a config file
+    // --- 1. Load Configuration ---
+    let config = Config::load("config.toml")?;
+    println!("Configuration loaded successfully.");
+
+    // --- 2. Initialize State from Config ---
+    let validators_content = fs::read_to_string(&config.chain.validators_file)?;
+    let validators_data: HashMap<String, Vec<String>> = serde_json::from_str(&validators_content)?;
+    let validator_set: HashSet<String> = validators_data.get("validators").unwrap().iter().cloned().collect();
+
     let blockchain = Arc::new(Mutex::new(blockchain::Blockchain::new(validator_set)));
     let mempool = Arc::new(Mutex::new(mempool::Mempool::new()));
-    let peer_manager = Arc::new(Mutex::new(p2p::PeerManager::default()));
+    // PeerManager and other P2P components would be initialized here...
 
-    // --- 2. Communication Channels ---
-    // A channel for other tasks to send messages to the P2P network task.
+    // --- 3. Communication Channels ---
     let (p2p_tx, _p2p_rx) = mpsc::channel(100);
 
-    // --- 3. Spawning Concurrent Tasks ---
+    // --- 4. Spawning Concurrent Tasks ---
 
     // TODO: Create the API task
-    // let api_task = tokio::spawn(run_api(...));
-    
+    // let api_state = api::AppState { mempool: mempool.clone(), p2p_tx: p2p_tx.clone() };
+    // let api_task = tokio::spawn(api::run_api(config.api, api_state));
+    // println!("API service task spawned.");
+
     // TODO: Create the P2P network task
-    // let p2p_task = tokio::spawn(run_p2p_network(...));
+    // let p2p_task = tokio::spawn(p2p::run_p2p_network(...));
+    // println!("P2P service task spawned.");
 
-    // TODO: Create the XRPL Witness task
-    // let witness_task = tokio::spawn(xrpl_witness::run_xrpl_witness());
-
-    println!("Node initialized. Waiting for tasks to complete.");
+    // Create the XRPL Witness task
+    let witness_task = tokio::spawn(xrpl_witness::run_xrpl_witness(config.witness));
+    println!("XRPL Witness service task spawned.");
     
-    // In a real node, you'd likely have a graceful shutdown mechanism here.
-    // For now, we can just let the tasks run.
-    // tokio::try_join!(api_task, p2p_task, witness_task)?;
-    
-    // Placeholder to keep the main function alive.
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    // --- 5. Graceful Shutdown ---
+    match signal::ctrl_c().await {
+        Ok(()) => {
+            println!("\nCtrl-C received. Shutting down node gracefully...");
+            // Abort running tasks
+            // api_task.abort();
+            // p2p_task.abort();
+            witness_task.abort();
+            println!("All services stopped.");
+        }
+        Err(err) => {
+            eprintln!("Unable to listen for shutdown signal: {}", err);
+        }
     }
     
-    // Ok(())
-}                                }
-                                Err(e) => {
-                                    println!("[Gossip] ❌ Block is invalid: {}. Penalizing peer.", e);
-                                    let should_ban = peer_manager.lock().unwrap().penalize_peer(&source_peer, 50);
-                                    if should_ban {
-                                        println!("[Swarm] Banning peer {}", source_peer);
-                                        swarm.ban_peer(source_peer);
-                                    }
-                                }
-                            }
-                        }
-                        Ok(ChainMessage::Transaction(tx)) => {
-                            // A similar reward/penalize logic can be applied here.
-                            // e.g., penalize for duplicate or invalid transactions.
+    Ok(())
+}                            // e.g., penalize for duplicate or invalid transactions.
                             println!("[Gossip] Received transaction {} from peer {}", tx.hash, source_peer);
                             // mempool.lock().unwrap().add_transaction(tx);
                         }
