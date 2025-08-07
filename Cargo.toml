@@ -4,19 +4,32 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# --- Serialization ---
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# --- Cryptography & Hashes ---
 sha2 = "0.10"
-chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = { version = "2.1.1", features = ["serde"] }
 rand = "0.8"
 hex = "0.4"
-libp2p = { version = "0.53", features = ["tokio", "gossipsub", "mdns", "macros", "tcp", "json"] }
-tokio = { version = "1", features = ["full"] }
-once_cell = "1.19"
-axum = "0.7"
-# We also need to add the "full" feature to tokio if not already present
-tokio = { version = "1", features = ["full"] }
-xrpl-rust = "0.3"
-# Add this to your [dependencies] section
+
+# --- Asynchronous Runtime & Concurrency ---
+tokio = { version = "1.32", features = ["full"] }
+futures-util = "0.3"
+
+# --- Networking ---
+libp2p = { version = "0.53", features = ["tokio", "gossipsub", "mdns", "macros", "tcp", "json", "noise", "yamux"] }
 tower-governor = "0.2"
+
+# --- Web Server (API) ---
+axum = "0.7"
+tower = { version = "0.4", features = ["full"] }
+
+
+# --- Blockchain & Ledger ---
+xrpl-rust = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+
+# --- Utilities ---
+thiserror = "1.0"
