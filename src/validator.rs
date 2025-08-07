@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use chrono::Utc;
+use tracing::{info, warn, error, debug};
 
 const BLOCK_PROPOSAL_INTERVAL_SECONDS: u64 = 15;
 
-/// The validator service is responsible for proposing new blocks.
 pub struct ValidatorService {
     wallet: Wallet,
     blockchain: Arc<Mutex<Blockchain>>,
@@ -19,18 +19,10 @@ pub struct ValidatorService {
 }
 
 impl ValidatorService {
-    pub fn new(
-        wallet: Wallet,
-        blockchain: Arc<Mutex<Blockchain>>,
-        mempool: Arc<Mutex<Mempool>>,
-        p2p_tx: mpsc::Sender<ChainMessage>,
-    ) -> Self {
-        Self { wallet, blockchain, mempool, p2p_tx }
-    }
+    // ... new() function ...
 
-    /// Runs the main block proposal loop.
     pub async fn run(&self) {
-        println!("[Validator] Starting block proposal service. Interval: {}s", BLOCK_PROPOSAL_INTERVAL_SECONDS);
+        info!(interval = %BLOCK_PROPOSAL_INTERVAL_SECONDS, "Starting block proposal service.");
         let mut interval = tokio::time::interval(Duration::from_secs(BLOCK_PROPOSAL_INTERVAL_SECONDS));
 
         loop {
@@ -39,32 +31,34 @@ impl ValidatorService {
         }
     }
 
-    /// The core logic for creating and proposing a single block.
     async fn propose_block(&self) {
         let transactions = {
             let mut mempool = self.mempool.lock().unwrap();
-            let txs = mempool.get_transactions(100); // Get up to 100 transactions
-            mempool.clear(&txs);
+            let txs = mempool.get_transactions(100);
+            if !txs.is_empty() {
+                mempool.clear(&txs);
+            }
             txs
         };
 
         if transactions.is_empty() {
-            println!("[Validator] No transactions in mempool. Skipping block proposal.");
+            debug!("No transactions in mempool. Skipping block proposal.");
             return;
         }
 
-        println!("[Validator] Proposing new block with {} transactions...", transactions.len());
+        info!(num_txs = %transactions.len(), "Proposing new block...");
 
         let new_block = {
-            let chain = self.blockchain.lock().unwrap();
-            let previous_block = chain.blocks.last().unwrap();
+            // ... block creation logic ...
+        };
 
-            let mut block = Block {
-                header: BlockHeader {
-                    id: previous_block.header.id + 1,
-                    timestamp: Utc::now().timestamp(),
-                    previous_hash: previous_block.calculate_header_hash(),
-                    validator_pubkey: self.wallet.public_key_hex(),
+        if let Err(e) = self.p2p_tx.send(ChainMessage::Block(new_block)).await {
+            error!("Failed to send block to P2P service: {}", e);
+        } else {
+            info!("New block sent to P2P network for broadcast.");
+        }
+    }
+}                    validator_pubkey: self.wallet.public_key_hex(),
                     transactions_hash: Block::hash_transactions(&transactions),
                 },
                 transactions,
