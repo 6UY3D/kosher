@@ -126,3 +126,23 @@ The block creation logic (the "create" command) would now look like this:
 4. Gossip the new block.
 5. Call `mempool.clear(&transactions_in_block)` to remove them from the mempool.
 */
+// ... other module imports
+mod xrpl_witness;
+
+// ... other use statements
+use xrpl_witness::run_xrpl_witness;
+
+#[tokio::main]
+async fn main() {
+    // --- 1. Setup Shared State ---
+    // ... all setup from Phase 5 ...
+
+    // --- 2. Start the API Server ---
+    tokio::spawn(run_api(app_state));
+
+    // --- 3. Start the XRPL Witness Service ---
+    tokio::spawn(run_xrpl_witness());
+
+    // --- 4. Setup and Run the P2P Swarm ---
+    // ... all P2P setup and main event loop from Phase 5 ...
+}
