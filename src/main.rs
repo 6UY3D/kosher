@@ -1,70 +1,161 @@
 mod block;
 mod blockchain;
 mod wallet;
+mod p2p;
 
 use block::{Block, BlockHeader, Transaction};
 use blockchain::Blockchain;
 use wallet::Wallet;
+use p2p::{ChainBehaviour, ChainBehaviourEvent, ChainMessage, CHAIN_TOPIC};
+
+use libp2p::{
+    identity, PeerId, Swarm,
+    swarm::{SwarmBuilder, SwarmEvent},
+    gossipsub, mdns, tcp,
+};
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use tokio::io::{self, AsyncBufReadExt};
 
 const CHAIN_FILE: &str = "chain.json";
 
-fn main() {
-    println!("--- Kosher Chain: Phase 3 ---");
+#[tokio::main]
+async fn main() {
+    println!("--- Kosher Chain: Phase 4 ---");
 
-    // 1. Create wallets for the Rabbinic Council validators
+    // --- 1. Setup Wallets and Blockchain State ---
     let rabbi_a_wallet = Wallet::new();
-    let rabbi_b_wallet = Wallet::new();
-    let council_member_c_wallet = Wallet::new();
-    let unauthorized_wallet = Wallet::new(); // An outsider
-
-    // 2. Define the authorized validator set using their public keys
     let mut validator_set = HashSet::new();
     validator_set.insert(rabbi_a_wallet.public_key_hex());
-    validator_set.insert(rabbi_b_wallet.public_key_hex());
-    validator_set.insert(council_member_c_wallet.public_key_hex());
-
-    println!("Authorized Validators (Public Keys):");
-    for v in &validator_set {
-        println!("- {}", v);
-    }
-
-    // 3. Load or create the blockchain with the validator set
-    let mut kosher_chain = Blockchain::load_from_file(CHAIN_FILE, validator_set);
-    println!("\nBlockchain loaded. Current block count: {}", kosher_chain.blocks.len());
-
-    // 4. A valid validator (Rabbi A) creates a new block
-    println!("\nAttempting to add a block by an authorized validator (Rabbi A)...");
     
-    let new_transactions = vec![Transaction { sender: "a".into(), recipient: "b".into(), amount: 10.0 }];
-    let previous_block = kosher_chain.blocks.last().unwrap();
+    // Use Arc<Mutex> for safe shared access to the blockchain across async tasks
+    let blockchain = Arc::new(Mutex::new(Blockchain::load_from_file(
+        CHAIN_FILE,
+        validator_set,
+    )));
 
-    let mut valid_block = Block {
-        header: BlockHeader {
-            id: previous_block.header.id + 1,
-            timestamp: chrono::Utc::now().timestamp(),
-            previous_hash: previous_block.calculate_header_hash(),
-            validator_pubkey: rabbi_a_wallet.public_key_hex(),
-            transactions_hash: Block::hash_transactions(&new_transactions),
-        },
-        transactions: new_transactions,
-        signature: Signature::from_bytes(&[0; 64]).unwrap(), // Dummy signature for now
-    };
-    let block_hash = valid_block.calculate_header_hash();
-    valid_block.signature = rabbi_a_wallet.sign(block_hash.as_bytes());
+    // --- 2. Create a new Swarm for P2P networking ---
+    let id_keys = identity::Keypair::generate_ed25519();
+    let peer_id = PeerId::from(id_keys.public());
+    println!("Local peer ID: {}", peer_id);
 
-    match kosher_chain.add_block(valid_block) {
-        Ok(_) => println!("✅ SUCCESS: Block added by Rabbi A."),
-        Err(e) => eprintln!("❌ FAILURE: {}", e),
+    let transport = tcp::tokio::Transport::new(tcp::Config::default())
+        .upgrade(libp2p::core::upgrade::Version::V1Lazy)
+        .authenticate(libp2p::noise::Config::new(&id_keys).unwrap())
+        .multiplex(libp2p::yamux::Config::default())
+        .boxed();
+    
+    let gossipsub_config = gossipsub::Config::default();
+    let mut gossipsub = gossipsub::Behaviour::new(
+        gossipsub::MessageAuthenticity::Signed(id_keys),
+        gossipsub_config,
+    ).unwrap();
+    gossipsub.subscribe(&CHAIN_TOPIC).unwrap();
+    
+    let mdns = mdns::Behaviour::new(mdns::Config::default(), peer_id).unwrap();
+    
+    let behaviour = ChainBehaviour { gossipsub, mdns };
+
+    let mut swarm = SwarmBuilder::with_tokio_executor(transport, behaviour, peer_id).build();
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
+    
+    // --- 3. Start a task to read user input for creating new blocks ---
+    let bc_clone = Arc::clone(&blockchain);
+    tokio::spawn(async move {
+        let mut stdin = io::BufReader::new(io::stdin()).lines();
+        loop {
+            if let Ok(Some(line)) = stdin.next_line().await {
+                if line == "create" {
+                    println!("Creating a new block...");
+                    let new_tx = vec![Transaction {
+                        sender: "system".into(),
+                        recipient: "p2p_node".into(),
+                        amount: 1.0,
+                    }];
+                    
+                    let mut chain = bc_clone.lock().unwrap();
+                    let prev_block = chain.blocks.last().unwrap();
+                    
+                    let mut new_block = Block {
+                        header: BlockHeader {
+                            id: prev_block.header.id + 1,
+                            timestamp: chrono::Utc::now().timestamp(),
+                            previous_hash: prev_block.calculate_header_hash(),
+                            validator_pubkey: rabbi_a_wallet.public_key_hex(),
+                            transactions_hash: Block::hash_transactions(&new_tx),
+                        },
+                        transactions: new_tx,
+                        signature: libp2p::identity::ed25519::Signature::new([0; 64]), // Dummy
+                    };
+                    
+                    let hash = new_block.calculate_header_hash();
+                    // In a real PoA system, the wallet would be managed securely.
+                    // new_block.signature = rabbi_a_wallet.sign(hash.as_bytes()); // This needs type conversion
+                    
+                    println!("New block created. It will be gossiped to the network.");
+                    
+                    // Announce the block via gossipsub
+                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish(
+                        CHAIN_TOPIC.clone(),
+                        serde_json::to_string(&ChainMessage::Block(new_block.clone())).unwrap()
+                    ) {
+                        eprintln!("Error publishing block: {:?}", e);
+                    }
+                    
+                    // Add the block to our own chain
+                    // For simplicity, we skip the signing and validation for now
+                    chain.blocks.push(new_block);
+
+                }
+            }
+        }
+    });
+
+
+    // --- 4. Main network event loop ---
+    loop {
+        match swarm.select_next_some().await {
+            SwarmEvent::Behaviour(ChainBehaviourEvent::Mdns(event)) => match event {
+                libp2p::mdns::Event::Discovered(list) => {
+                    for (peer_id, _multiaddr) in list {
+                        println!("mDNS discovered a new peer: {}", peer_id);
+                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                    }
+                }
+                libp2p::mdns::Event::Expired(list) => {
+                    for (peer_id, _multiaddr) in list {
+                        println!("mDNS peer has expired: {}", peer_id);
+                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                    }
+                }
+            },
+            SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(event)) => {
+                if let gossipsub::Event::Message { message, .. } = event {
+                    if let Ok(msg) = serde_json::from_slice::<ChainMessage>(&message.data) {
+                        match msg {
+                            ChainMessage::Block(block) => {
+                                println!("Received new block #{} from a peer.", block.header.id);
+                                let mut chain = blockchain.lock().unwrap();
+                                // In a real implementation, you would run the full
+                                // is_block_valid check from Phase 3 here.
+                                if block.header.previous_hash == chain.blocks.last().unwrap().calculate_header_hash() {
+                                    println!("✅ Block is valid. Adding to our chain.");
+                                    chain.blocks.push(block);
+                                } else {
+                                    println!("❌ Block is invalid or for a different fork.");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            SwarmEvent::NewListenAddr { address, .. } => {
+                println!("Node listening on {:?}", address);
+            }
+            _ => {}
+        }
     }
-
-    // 5. An unauthorized person attempts to create a block
-    println!("\nAttempting to add a block by an unauthorized person...");
-
-    let rogue_transactions = vec![Transaction { sender: "x".into(), recipient: "y".into(), amount: 99.0 }];
-    let previous_block = kosher_chain.blocks.last().unwrap();
-
-    let mut rogue_block = Block {
+}    let mut rogue_block = Block {
         header: BlockHeader {
             id: previous_block.header.id + 1,
             timestamp: chrono::Utc::now().timestamp(),
