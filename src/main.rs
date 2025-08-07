@@ -1,70 +1,57 @@
+// A placeholder for the full main.rs which would integrate all modules.
+// Due to the complexity, this is a structural skeleton.
+// You would merge the logic from the P2P, API, and Witness phases here.
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+// Import modules
 mod block;
 mod blockchain;
 mod wallet;
 mod p2p;
-// mempool module would also exist here from previous phases
-
-use p2p::{ChainBehaviour, ChainBehaviourEvent, PeerManager, ChainMessage, CHAIN_TOPIC};
-use blockchain::Blockchain;
-
-use libp2p::{
-    PeerId, Swarm,
-    swarm::{SwarmBuilder, SwarmEvent},
-    gossipsub,
-    // other required libp2p imports
-};
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
-
+mod mempool;
+mod xrpl_witness;
+mod errors;
 
 #[tokio::main]
-async fn main() {
-    println!("--- Kosher Chain: Phase B (Hardened P2P) ---");
+async fn main() -> Result<(), errors::NodeError> {
+    println!("--- Kosher Chain Node Starting ---");
 
-    // --- 1. Setup Shared State ---
-    let blockchain = Arc::new(Mutex::new(Blockchain::new(/*...*/))); // Assume initialized
-    let peer_manager = Arc::new(Mutex::new(PeerManager::default()));
-    let (p2p_tx, mut p2p_rx) = mpsc::channel(100);
+    // --- 1. Shared State Initialization ---
+    // In a real app, this would be loaded from config/disk.
+    let validator_set = std::collections::HashSet::new(); // Populate this from a config file
+    let blockchain = Arc::new(Mutex::new(blockchain::Blockchain::new(validator_set)));
+    let mempool = Arc::new(Mutex::new(mempool::Mempool::new()));
+    let peer_manager = Arc::new(Mutex::new(p2p::PeerManager::default()));
+
+    // --- 2. Communication Channels ---
+    // A channel for other tasks to send messages to the P2P network task.
+    let (p2p_tx, _p2p_rx) = mpsc::channel(100);
+
+    // --- 3. Spawning Concurrent Tasks ---
+
+    // TODO: Create the API task
+    // let api_task = tokio::spawn(run_api(...));
     
-    // --- 2. Setup P2P Swarm ---
-    let mut swarm: Swarm<ChainBehaviour> = /* ... setup code from Phase 4 ... */;
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
+    // TODO: Create the P2P network task
+    // let p2p_task = tokio::spawn(run_p2p_network(...));
 
+    // TODO: Create the XRPL Witness task
+    // let witness_task = tokio::spawn(xrpl_witness::run_xrpl_witness());
 
-    // --- 3. Main Event Loop ---
+    println!("Node initialized. Waiting for tasks to complete.");
+    
+    // In a real node, you'd likely have a graceful shutdown mechanism here.
+    // For now, we can just let the tasks run.
+    // tokio::try_join!(api_task, p2p_task, witness_task)?;
+    
+    // Placeholder to keep the main function alive.
     loop {
-        tokio::select! {
-            // Handle internal messages (e.g., from API to gossip a tx)
-            Some(msg_to_gossip) = p2p_rx.recv() => {
-                 // Logic to gossip messages from other tasks
-            }
-
-            // Handle events from the P2P swarm
-            event = swarm.select_next_some() => match event {
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    println!("[Swarm] Connection established with: {}", peer_id);
-                    peer_manager.lock().unwrap().add_peer(peer_id);
-                }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    println!("[Swarm] Connection closed with: {}", peer_id);
-                    peer_manager.lock().unwrap().remove_peer(&peer_id);
-                }
-
-                SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(
-                    gossipsub::Event::Message { message, .. }
-                )) => {
-                    let source_peer = message.source.expect("Message must have a source");
-                    
-                    match serde_json::from_slice::<ChainMessage>(&message.data) {
-                        Ok(ChainMessage::Block(block)) => {
-                            println!("[Gossip] Received new block #{} from peer {}", block.header.id, source_peer);
-                            
-                            let mut chain = blockchain.lock().unwrap();
-                            match chain.validate_and_add_block(block) {
-                                Ok(_) => {
-                                    println!("[Gossip] ✅ Block is valid. Rewarding peer.");
-                                    peer_manager.lock().unwrap().reward_peer(&source_peer, 10);
-                                }
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    }
+    
+    // Ok(())
+}                                }
                                 Err(e) => {
                                     println!("[Gossip] ❌ Block is invalid: {}. Penalizing peer.", e);
                                     let should_ban = peer_manager.lock().unwrap().penalize_peer(&source_peer, 50);
