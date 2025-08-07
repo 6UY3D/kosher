@@ -12,6 +12,7 @@ mod mempool;
 mod xrpl_witness;
 mod errors;
 mod config;
+mod api; // New API module
 
 use config::Config;
 use errors::NodeError;
@@ -27,44 +28,50 @@ async fn main() -> Result<(), NodeError> {
     // --- 2. Initialize State from Config ---
     let validators_content = fs::read_to_string(&config.chain.validators_file)?;
     let validators_data: HashMap<String, Vec<String>> = serde_json::from_str(&validators_content)?;
-    let validator_set: HashSet<String> = validators_data.get("validators").unwrap().iter().cloned().collect();
+    let validator_set: HashSet<String> = validators_data.get("validators")
+        .expect("`validators` key not found in validators file")
+        .iter()
+        .cloned()
+        .collect();
 
     let blockchain = Arc::new(Mutex::new(blockchain::Blockchain::new(validator_set)));
     let mempool = Arc::new(Mutex::new(mempool::Mempool::new()));
-    // PeerManager and other P2P components would be initialized here...
+    let peer_manager = Arc::new(Mutex::new(p2p::PeerManager::default()));
 
     // --- 3. Communication Channels ---
-    let (p2p_tx, _p2p_rx) = mpsc::channel(100);
+    let (p2p_tx, p2p_rx) = mpsc::channel(100);
 
     // --- 4. Spawning Concurrent Tasks ---
+    
+    // API Task
+    let api_state = api::AppState { mempool: mempool.clone(), p2p_tx: p2p_tx.clone() };
+    let api_task = tokio::spawn(api::run_api(config.api, api_state));
+    println!("[Main] API service task spawned.");
 
-    // TODO: Create the API task
-    // let api_state = api::AppState { mempool: mempool.clone(), p2p_tx: p2p_tx.clone() };
-    // let api_task = tokio::spawn(api::run_api(config.api, api_state));
-    // println!("API service task spawned.");
+    // P2P Network Task
+    let p2p_task = tokio::spawn(p2p::run_p2p_network(config.p2p, blockchain.clone(), mempool.clone(), peer_manager.clone(), p2p_rx));
+    println!("[Main] P2P service task spawned.");
 
-    // TODO: Create the P2P network task
-    // let p2p_task = tokio::spawn(p2p::run_p2p_network(...));
-    // println!("P2P service task spawned.");
-
-    // Create the XRPL Witness task
+    // XRPL Witness Task
     let witness_task = tokio::spawn(xrpl_witness::run_xrpl_witness(config.witness));
-    println!("XRPL Witness service task spawned.");
+    println!("[Main] XRPL Witness service task spawned.");
     
     // --- 5. Graceful Shutdown ---
     match signal::ctrl_c().await {
         Ok(()) => {
-            println!("\nCtrl-C received. Shutting down node gracefully...");
-            // Abort running tasks
-            // api_task.abort();
-            // p2p_task.abort();
+            println!("\n[Main] Ctrl-C received. Shutting down node gracefully...");
+            api_task.abort();
+            p2p_task.abort();
             witness_task.abort();
-            println!("All services stopped.");
+            println!("[Main] All services stopped.");
         }
         Err(err) => {
-            eprintln!("Unable to listen for shutdown signal: {}", err);
+            eprintln!("[Main] Unable to listen for shutdown signal: {}", err);
         }
     }
+    
+    Ok(())
+}    }
     
     Ok(())
 }                            // e.g., penalize for duplicate or invalid transactions.
