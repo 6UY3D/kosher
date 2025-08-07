@@ -1,19 +1,20 @@
 # Configuration for the Kosher Chain Node
 
 [api]
-listen_address = "127.0.0.1:3000" # API server listen address and port
+listen_address = "127.0.0.1:3000"
 
 [p2p]
-listen_address = "/ip4/0.0.0.0/tcp/0" # P2P network listen address (0 means random port)
-# Add bootstrap peer multiaddresses here if you have dedicated nodes
-# bootstrap_nodes = [
-#   "/ip4/123.45.67.89/tcp/4001/p2p/Qm...",
-# ]
+listen_address = "/ip4/0.0.0.0/tcp/0"
 
 [witness]
 xrpl_node_url = "wss://s1.ripple.com:51234"
-door_account = "rReceivingAccountOnXrpl..." # IMPORTANT: Replace with your actual multisig door account
-confirmation_threshold = 10 # Number of ledgers to wait for finality
+door_account = "rReceivingAccountOnXrpl..."
+confirmation_threshold = 10
 
 [chain]
-validators_file = "validators.json" # Path to the file with the validator public keys
+validators_file = "validators.json"
+
+# --- Optional Validator Configuration ---
+# If this section is present, the node will attempt to run as a validator.
+# [validator]
+# key_file = "validator_key.json"
