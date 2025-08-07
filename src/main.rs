@@ -1,6 +1,7 @@
 use std::collections::{HashSet, HashMap};
 use std::fs;
 use std::sync::{Arc, Mutex};
+use std::path::Path;
 use tokio::sync::mpsc;
 use tokio::signal;
 
@@ -12,10 +13,12 @@ mod mempool;
 mod xrpl_witness;
 mod errors;
 mod config;
-mod api; // New API module
+mod api;
+mod validator; // New validator module
 
 use config::Config;
 use errors::NodeError;
+use wallet::Wallet;
 
 #[tokio::main]
 async fn main() -> Result<(), NodeError> {
@@ -23,7 +26,7 @@ async fn main() -> Result<(), NodeError> {
 
     // --- 1. Load Configuration ---
     let config = Config::load("config.toml")?;
-    println!("Configuration loaded successfully.");
+    println!("[Main] Configuration loaded successfully.");
 
     // --- 2. Initialize State from Config ---
     let validators_content = fs::read_to_string(&config.chain.validators_file)?;
@@ -34,7 +37,7 @@ async fn main() -> Result<(), NodeError> {
         .cloned()
         .collect();
 
-    let blockchain = Arc::new(Mutex::new(blockchain::Blockchain::new(validator_set)));
+    let blockchain = Arc::new(Mutex::new(blockchain::Blockchain::new(validator_set.clone())));
     let mempool = Arc::new(Mutex::new(mempool::Mempool::new()));
     let peer_manager = Arc::new(Mutex::new(p2p::PeerManager::default()));
 
@@ -55,14 +58,42 @@ async fn main() -> Result<(), NodeError> {
     // XRPL Witness Task
     let witness_task = tokio::spawn(xrpl_witness::run_xrpl_witness(config.witness));
     println!("[Main] XRPL Witness service task spawned.");
+
+    // --- 5. Conditional Validator Service ---
+    if let Some(validator_config) = config.validator {
+        println!("[Main] Validator config found. Attempting to start validator service...");
+        let validator_wallet = Wallet::load_or_create(Path::new(&validator_config.key_file))?;
+        
+        if validator_set.contains(&validator_wallet.public_key_hex()) {
+            println!("[Main] ✅ Wallet public key is in the official validator set.");
+            let validator_service = validator::ValidatorService::new(
+                validator_wallet,
+                blockchain.clone(),
+                mempool.clone(),
+                p2p_tx.clone(),
+            );
+            tokio::spawn(validator_service.run());
+        } else {
+            eprintln!("[Main] 🚨 WARNING: Wallet key is not in the validator set. Node will run in non-validating mode.");
+        }
+    } else {
+        println!("[Main] No validator config found. Running in non-validating mode.");
+    }
     
-    // --- 5. Graceful Shutdown ---
+    // --- 6. Graceful Shutdown ---
     match signal::ctrl_c().await {
         Ok(()) => {
             println!("\n[Main] Ctrl-C received. Shutting down node gracefully...");
-            api_task.abort();
-            p2p_task.abort();
-            witness_task.abort();
+            // Abort handles are not necessary if tasks gracefully exit on channel close/error
+            println!("[Main] All services stopped.");
+        }
+        Err(err) => {
+            eprintln!("[Main] Unable to listen for shutdown signal: {}", err);
+        }
+    }
+    
+    Ok(())
+}            witness_task.abort();
             println!("[Main] All services stopped.");
         }
         Err(err) => {
