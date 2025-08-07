@@ -1,70 +1,102 @@
 mod block;
 mod blockchain;
 mod wallet;
+mod p2p;
+// mempool module would also exist here from previous phases
 
-use block::{Block, BlockHeader, Transaction};
-use blockchain::{Blockchain, AccountState};
-use wallet::Wallet;
-use std::collections::{HashMap, HashSet};
+use p2p::{ChainBehaviour, ChainBehaviourEvent, PeerManager, ChainMessage, CHAIN_TOPIC};
+use blockchain::Blockchain;
 
-fn main() {
-    println!("--- Kosher Chain: Phase A (Hardened) ---");
+use libp2p::{
+    PeerId, Swarm,
+    swarm::{SwarmBuilder, SwarmEvent},
+    gossipsub,
+    // other required libp2p imports
+};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
-    // 1. Setup wallets for a user and a validator
-    let user_wallet = Wallet::new();
-    let validator_wallet = Wallet::new();
-    let recipient_pubkey = Wallet::new().public_key_hex();
 
-    // 2. Setup the Blockchain with the validator and initial user state
-    let mut validator_set = HashSet::new();
-    validator_set.insert(validator_wallet.public_key_hex());
+#[tokio::main]
+async fn main() {
+    println!("--- Kosher Chain: Phase B (Hardened P2P) ---");
+
+    // --- 1. Setup Shared State ---
+    let blockchain = Arc::new(Mutex::new(Blockchain::new(/*...*/))); // Assume initialized
+    let peer_manager = Arc::new(Mutex::new(PeerManager::default()));
+    let (p2p_tx, mut p2p_rx) = mpsc::channel(100);
     
-    let mut initial_state = HashMap::new();
-    initial_state.insert(
-        user_wallet.public_key_hex(),
-        AccountState { nonce: 0, balance: 1000 }
-    );
-    
-    // We create a new blockchain manually here for demo purposes.
-    let mut kosher_chain = Blockchain {
-        blocks: vec![ /* genesis block */ ], // Assume a genesis block exists
-        validator_set,
-        state: initial_state,
-    };
+    // --- 2. Setup P2P Swarm ---
+    let mut swarm: Swarm<ChainBehaviour> = /* ... setup code from Phase 4 ... */;
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
 
-    // 3. User creates a valid transaction (nonce = 0)
-    println!("\nUser creating first transaction (nonce 0)...");
-    let tx1 = Transaction::new(
-        &user_wallet,
-        recipient_pubkey.clone(),
-        100,
-        0 // Correct first nonce
-    );
-    println!("Transaction Hash: {}", tx1.hash);
 
-    // 4. Validator creates and signs a block with this transaction
-    let previous_block = kosher_chain.blocks.last().unwrap();
-    let mut block1 = Block {
-        header: BlockHeader {
-            id: previous_block.header.id + 1,
-            timestamp: 0, // Simplified timestamp
-            previous_hash: previous_block.calculate_header_hash(),
-            validator_pubkey: validator_wallet.public_key_hex(),
-            transactions_hash: Block::hash_transactions(&vec![tx1.clone()]),
-        },
-        transactions: vec![tx1.clone()],
-        signature: ed25519_dalek::Signature::from_bytes(&[0; 64]).unwrap(), // Dummy
-    };
-    let block1_hash = block1.calculate_header_hash();
-    block1.signature = validator_wallet.sign(block1_hash.as_bytes());
-    
-    // 5. Add the valid block to the chain
-    println!("\nValidator proposing block with nonce 0 transaction...");
-    match kosher_chain.validate_and_add_block(block1) {
-        Ok(_) => println!("✅ SUCCESS: Block 1 added."),
-        Err(e) => eprintln!("❌ FAILURE: {}", e),
+    // --- 3. Main Event Loop ---
+    loop {
+        tokio::select! {
+            // Handle internal messages (e.g., from API to gossip a tx)
+            Some(msg_to_gossip) = p2p_rx.recv() => {
+                 // Logic to gossip messages from other tasks
+            }
+
+            // Handle events from the P2P swarm
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                    println!("[Swarm] Connection established with: {}", peer_id);
+                    peer_manager.lock().unwrap().add_peer(peer_id);
+                }
+                SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                    println!("[Swarm] Connection closed with: {}", peer_id);
+                    peer_manager.lock().unwrap().remove_peer(&peer_id);
+                }
+
+                SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(
+                    gossipsub::Event::Message { message, .. }
+                )) => {
+                    let source_peer = message.source.expect("Message must have a source");
+                    
+                    match serde_json::from_slice::<ChainMessage>(&message.data) {
+                        Ok(ChainMessage::Block(block)) => {
+                            println!("[Gossip] Received new block #{} from peer {}", block.header.id, source_peer);
+                            
+                            let mut chain = blockchain.lock().unwrap();
+                            match chain.validate_and_add_block(block) {
+                                Ok(_) => {
+                                    println!("[Gossip] ✅ Block is valid. Rewarding peer.");
+                                    peer_manager.lock().unwrap().reward_peer(&source_peer, 10);
+                                }
+                                Err(e) => {
+                                    println!("[Gossip] ❌ Block is invalid: {}. Penalizing peer.", e);
+                                    let should_ban = peer_manager.lock().unwrap().penalize_peer(&source_peer, 50);
+                                    if should_ban {
+                                        println!("[Swarm] Banning peer {}", source_peer);
+                                        swarm.ban_peer(source_peer);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(ChainMessage::Transaction(tx)) => {
+                            // A similar reward/penalize logic can be applied here.
+                            // e.g., penalize for duplicate or invalid transactions.
+                            println!("[Gossip] Received transaction {} from peer {}", tx.hash, source_peer);
+                            // mempool.lock().unwrap().add_transaction(tx);
+                        }
+                        Err(_) => {
+                            println!("[Gossip] ❌ Received malformed message from {}. Penalizing peer.", source_peer);
+                            let should_ban = peer_manager.lock().unwrap().penalize_peer(&source_peer, 25);
+                            if should_ban {
+                                swarm.ban_peer(source_peer);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Handle other events like Mdns discovery...
+                }
+            }
+        }
     }
-    println!("User state after tx: {:?}", kosher_chain.state.get(&user_wallet.public_key_hex()));
+}    println!("User state after tx: {:?}", kosher_chain.state.get(&user_wallet.public_key_hex()));
 
 
     // 6. **DEMONSTRATE SECURITY**: Attacker tries to replay the same transaction in a new block
