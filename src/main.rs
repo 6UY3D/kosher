@@ -2,180 +2,127 @@ mod block;
 mod blockchain;
 mod wallet;
 mod p2p;
+mod mempool; // Add mempool module
 
-use block::{Block, BlockHeader, Transaction};
+use block::Transaction;
 use blockchain::Blockchain;
-use wallet::Wallet;
-use p2p::{ChainBehaviour, ChainBehaviourEvent, ChainMessage, CHAIN_TOPIC};
+use mempool::Mempool;
+use p2p::{ChainBehaviour, ChainBehaviourEvent, ChainMessage, CHAIN_TOPIC, TRANSACTION_TOPIC};
 
-use libp2p::{
-    identity, PeerId, Swarm,
-    swarm::{SwarmBuilder, SwarmEvent},
-    gossipsub, mdns, tcp,
-};
-use std::collections::HashSet;
+use libp2p::{gossipsub, Swarm};
 use std::sync::{Arc, Mutex};
-use tokio::io::{self, AsyncBufReadExt};
+use tokio::sync::mpsc;
 
-const CHAIN_FILE: &str = "chain.json";
+// API related imports
+use axum::{
+    routing::post,
+    http::StatusCode,
+    Json, Router, extract::State,
+};
+use std::net::SocketAddr;
+
+// Define a shared state for our API
+#[derive(Clone)]
+struct AppState {
+    mempool: Arc<Mutex<Mempool>>,
+    p2p_tx: mpsc::Sender<ChainMessage>, // Channel to send messages to the p2p task
+}
 
 #[tokio::main]
 async fn main() {
-    println!("--- Kosher Chain: Phase 4 ---");
+    // --- 1. Setup Shared State ---
+    let blockchain = Arc::new(Mutex::new(Blockchain::load_from_file(/*..args..*/)));
+    let mempool = Arc::new(Mutex::new(Mempool::default()));
+    let (p2p_tx, mut p2p_rx) = mpsc::channel(100);
 
-    // --- 1. Setup Wallets and Blockchain State ---
-    let rabbi_a_wallet = Wallet::new();
-    let mut validator_set = HashSet::new();
-    validator_set.insert(rabbi_a_wallet.public_key_hex());
-    
-    // Use Arc<Mutex> for safe shared access to the blockchain across async tasks
-    let blockchain = Arc::new(Mutex::new(Blockchain::load_from_file(
-        CHAIN_FILE,
-        validator_set,
-    )));
+    // --- 2. Start the API Server ---
+    let app_state = AppState {
+        mempool: mempool.clone(),
+        p2p_tx,
+    };
+    tokio::spawn(run_api(app_state));
 
-    // --- 2. Create a new Swarm for P2P networking ---
-    let id_keys = identity::Keypair::generate_ed25519();
-    let peer_id = PeerId::from(id_keys.public());
-    println!("Local peer ID: {}", peer_id);
+    // --- 3. Setup and Run the P2P Swarm ---
+    let mut swarm: Swarm<ChainBehaviour> = /* ... setup code from Phase 4 ... */;
+    swarm.behaviour_mut().gossipsub.subscribe(&CHAIN_TOPIC).unwrap();
+    swarm.behaviour_mut().gossipsub.subscribe(&TRANSACTION_TOPIC).unwrap();
 
-    let transport = tcp::tokio::Transport::new(tcp::Config::default())
-        .upgrade(libp2p::core::upgrade::Version::V1Lazy)
-        .authenticate(libp2p::noise::Config::new(&id_keys).unwrap())
-        .multiplex(libp2p::yamux::Config::default())
-        .boxed();
-    
-    let gossipsub_config = gossipsub::Config::default();
-    let mut gossipsub = gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(id_keys),
-        gossipsub_config,
-    ).unwrap();
-    gossipsub.subscribe(&CHAIN_TOPIC).unwrap();
-    
-    let mdns = mdns::Behaviour::new(mdns::Config::default(), peer_id).unwrap();
-    
-    let behaviour = ChainBehaviour { gossipsub, mdns };
-
-    let mut swarm = SwarmBuilder::with_tokio_executor(transport, behaviour, peer_id).build();
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
-    
-    // --- 3. Start a task to read user input for creating new blocks ---
-    let bc_clone = Arc::clone(&blockchain);
-    tokio::spawn(async move {
-        let mut stdin = io::BufReader::new(io::stdin()).lines();
-        loop {
-            if let Ok(Some(line)) = stdin.next_line().await {
-                if line == "create" {
-                    println!("Creating a new block...");
-                    let new_tx = vec![Transaction {
-                        sender: "system".into(),
-                        recipient: "p2p_node".into(),
-                        amount: 1.0,
-                    }];
-                    
-                    let mut chain = bc_clone.lock().unwrap();
-                    let prev_block = chain.blocks.last().unwrap();
-                    
-                    let mut new_block = Block {
-                        header: BlockHeader {
-                            id: prev_block.header.id + 1,
-                            timestamp: chrono::Utc::now().timestamp(),
-                            previous_hash: prev_block.calculate_header_hash(),
-                            validator_pubkey: rabbi_a_wallet.public_key_hex(),
-                            transactions_hash: Block::hash_transactions(&new_tx),
-                        },
-                        transactions: new_tx,
-                        signature: libp2p::identity::ed25519::Signature::new([0; 64]), // Dummy
-                    };
-                    
-                    let hash = new_block.calculate_header_hash();
-                    // In a real PoA system, the wallet would be managed securely.
-                    // new_block.signature = rabbi_a_wallet.sign(hash.as_bytes()); // This needs type conversion
-                    
-                    println!("New block created. It will be gossiped to the network.");
-                    
-                    // Announce the block via gossipsub
-                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish(
-                        CHAIN_TOPIC.clone(),
-                        serde_json::to_string(&ChainMessage::Block(new_block.clone())).unwrap()
-                    ) {
-                        eprintln!("Error publishing block: {:?}", e);
-                    }
-                    
-                    // Add the block to our own chain
-                    // For simplicity, we skip the signing and validation for now
-                    chain.blocks.push(new_block);
-
-                }
-            }
-        }
-    });
-
-
-    // --- 4. Main network event loop ---
+    // --- 4. Main Event Loop ---
     loop {
-        match swarm.select_next_some().await {
-            SwarmEvent::Behaviour(ChainBehaviourEvent::Mdns(event)) => match event {
-                libp2p::mdns::Event::Discovered(list) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered a new peer: {}", peer_id);
-                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                    }
-                }
-                libp2p::mdns::Event::Expired(list) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS peer has expired: {}", peer_id);
-                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                    }
-                }
-            },
-            SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(event)) => {
-                if let gossipsub::Event::Message { message, .. } = event {
+        tokio::select! {
+            // Handle messages from other tasks (e.g., the API)
+            Some(msg) = p2p_rx.recv() => {
+                let topic = match msg {
+                    ChainMessage::Block(_) => CHAIN_TOPIC.clone(),
+                    ChainMessage::Transaction(_) => TRANSACTION_TOPIC.clone(),
+                };
+                let json_msg = serde_json::to_string(&msg).unwrap();
+                swarm.behaviour_mut().gossipsub.publish(topic, json_msg).unwrap();
+            }
+            // Handle events from the P2P swarm
+            event = swarm.select_next_some() => match event {
+                // ... other SwarmEvent handlers from Phase 4 ...
+                
+                // Handle incoming gossip messages
+                libp2p::swarm::SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(
+                    gossipsub::Event::Message { message, .. }
+                )) => {
                     if let Ok(msg) = serde_json::from_slice::<ChainMessage>(&message.data) {
                         match msg {
                             ChainMessage::Block(block) => {
-                                println!("Received new block #{} from a peer.", block.header.id);
-                                let mut chain = blockchain.lock().unwrap();
-                                // In a real implementation, you would run the full
-                                // is_block_valid check from Phase 3 here.
-                                if block.header.previous_hash == chain.blocks.last().unwrap().calculate_header_hash() {
-                                    println!("✅ Block is valid. Adding to our chain.");
-                                    chain.blocks.push(block);
-                                } else {
-                                    println!("❌ Block is invalid or for a different fork.");
-                                }
+                                // Block handling logic from Phase 4
+                            }
+                            ChainMessage::Transaction(tx) => {
+                                println!("Received new transaction via gossip: {}", tx.hash);
+                                mempool.lock().unwrap().add_transaction(tx);
                             }
                         }
                     }
                 }
+                _ => {}
             }
-            SwarmEvent::NewListenAddr { address, .. } => {
-                println!("Node listening on {:?}", address);
-            }
-            _ => {}
         }
     }
-}    let mut rogue_block = Block {
-        header: BlockHeader {
-            id: previous_block.header.id + 1,
-            timestamp: chrono::Utc::now().timestamp(),
-            previous_hash: previous_block.calculate_header_hash(),
-            validator_pubkey: unauthorized_wallet.public_key_hex(),
-            transactions_hash: Block::hash_transactions(&rogue_transactions),
-        },
-        transactions: rogue_transactions,
-        signature: Signature::from_bytes(&[0; 64]).unwrap(),
-    };
-    let rogue_hash = rogue_block.calculate_header_hash();
-    rogue_block.signature = unauthorized_wallet.sign(rogue_hash.as_bytes());
-
-    match kosher_chain.add_block(rogue_block) {
-        Ok(_) => println!("✅ SUCCESS: Block added by rogue actor."),
-        Err(e) => eprintln!("❌ FAILURE: {}. Block was correctly rejected.", e),
-    }
-
-    println!("\nFinal block count: {}", kosher_chain.blocks.len());
-
-    // Save the updated chain
-    kosher_chain.save_to_file(CHAIN_FILE).unwrap();
 }
+
+// --- API Server Logic ---
+async fn run_api(state: AppState) {
+    let app = Router::new()
+        .route("/transaction", post(handle_transaction))
+        .with_state(state);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    println!("API server listening on {}", addr);
+    axum::serve(axum::Server::bind(&addr), app).await.unwrap();
+}
+
+async fn handle_transaction(
+    State(state): State<AppState>,
+    Json(tx): Json<Transaction>,
+) -> StatusCode {
+    let mut mempool = state.mempool.lock().unwrap();
+    
+    // Add to local mempool
+    if mempool.add_transaction(tx.clone()) {
+        println!("Accepted new transaction via API: {}", tx.hash);
+        // Gossip to network
+        state.p2p_tx.send(ChainMessage::Transaction(tx)).await.unwrap();
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST // Transaction already exists
+    }
+}
+
+/*
+NOTE: The `main` function is heavily simplified to show the structure. You would need
+to merge this logic with the full code from Phase 4, including P2P setup, user input
+for block creation, and the main event loop. The key change is adding the `mempool`
+to the shared state and handling the new `ChainMessage::Transaction` variant.
+
+The block creation logic (the "create" command) would now look like this:
+1. Lock the mempool.
+2. Call `mempool.get_transactions(10)` to get up to 10 pending transactions.
+3. Create a new block with these transactions.
+4. Gossip the new block.
+5. Call `mempool.clear(&transactions_in_block)` to remove them from the mempool.
+*/
