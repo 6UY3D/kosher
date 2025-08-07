@@ -1,23 +1,34 @@
-use crate::block::{Block, BlockHeader, Transaction};
+use crate::block::{Block, Transaction};
 use crate::wallet::Wallet;
+use crate::errors::NodeError;
+use std::collections::{HashMap, HashSet};
+use ed25519_dalek::Signature;
 use chrono::Utc;
-use std::collections::HashSet;
-use std::fs;
-use std::io::{Error, ErrorKind};
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct AccountState {
+    pub nonce: u64,
+    pub balance: u64,
+}
+
+impl Default for AccountState {
+    fn default() -> Self {
+        Self { nonce: 0, balance: 0 }
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Blockchain {
     pub blocks: Vec<Block>,
-    // Use a HashSet for efficient validator lookup
     validator_set: HashSet<String>,
+    pub state: HashMap<String, AccountState>,
 }
 
 impl Blockchain {
-    /// Creates a new blockchain, initializing it with a set of approved validators.
+    /// Creates a new blockchain with a genesis block and an initial set of validators.
     pub fn new(validators: HashSet<String>) -> Self {
-        // The genesis block is special and doesn't require a real signature
         let genesis_block = Block {
-            header: BlockHeader {
+            header: crate::block::BlockHeader {
                 id: 0,
                 timestamp: Utc::now().timestamp(),
                 previous_hash: "0".repeat(64),
@@ -25,44 +36,82 @@ impl Blockchain {
                 transactions_hash: "0".repeat(64),
             },
             transactions: vec![],
-            // A dummy signature for the genesis block
             signature: Signature::from_bytes(&[0; 64]).unwrap(),
         };
 
         Self {
             blocks: vec![genesis_block],
             validator_set: validators,
+            state: HashMap::new(),
         }
     }
 
-    /// Attempts to add a block to the chain after rigorous validation.
-    pub fn add_block(&mut self, block: Block) -> Result<(), String> {
-        if self.is_block_valid(&block) {
-            self.blocks.push(block);
-            Ok(())
-        } else {
-            Err("Block validation failed".to_string())
+    /// Validates a block and its transactions, then adds it to the chain and updates the state.
+    pub fn validate_and_add_block(&mut self, block: Block) -> Result<(), NodeError> {
+        self.is_block_valid(&block)?;
+
+        // If the block is valid, update the state for each transaction
+        for tx in &block.transactions {
+            let sender_state = self.state.entry(tx.sender.clone()).or_default();
+            sender_state.balance -= tx.amount;
+            sender_state.nonce += 1;
+
+            let recipient_state = self.state.entry(tx.recipient.clone()).or_default();
+            recipient_state.balance += tx.amount;
         }
+
+        self.blocks.push(block);
+        Ok(())
     }
 
-    /// The core validation logic for the PoA consensus.
-    fn is_block_valid(&self, block: &Block) -> bool {
-        let previous_block = self.blocks.last().unwrap();
+    /// Performs comprehensive validation of a block and all its transactions.
+    fn is_block_valid(&self, block: &Block) -> Result<(), NodeError> {
+        let previous_block = self.blocks.last().ok_or_else(|| NodeError::Blockchain("Genesis block not found".into()))?;
 
-        // 1. Check if the validator is in the approved set
-        if !self.validator_set.contains(&block.header.validator_pubkey) {
-            println!("Validation Error: Validator not in the approved set.");
-            return false;
+        // --- Block Header Validation ---
+        if block.header.id != previous_block.header.id + 1 {
+            return Err(NodeError::Blockchain("Invalid block ID".into()));
         }
-
-        // 2. Check if the previous_hash is correct
         if block.header.previous_hash != previous_block.calculate_header_hash() {
-            println!("Validation Error: Previous hash does not match.");
-            return false;
+            return Err(NodeError::Blockchain("Previous hash mismatch".into()));
         }
 
-        // 3. Verify the validator's signature
+        // --- PoA Validator Validation ---
+        if !self.validator_set.contains(&block.header.validator_pubkey) {
+            return Err(NodeError::Blockchain("Validator not in the approved set".into()));
+        }
         let message = block.calculate_header_hash();
+        if !Wallet::verify_signature(&block.header.validator_pubkey, message.as_bytes(), &block.signature) {
+            return Err(NodeError::Blockchain("Invalid block signature".into()));
+        }
+
+        // --- Transaction Validation ---
+        for tx in &block.transactions {
+            self.is_transaction_valid(tx)?;
+        }
+
+        Ok(())
+    }
+
+    /// Validates an individual transaction against the current state.
+    pub fn is_transaction_valid(&self, tx: &Transaction) -> Result<(), NodeError> {
+        if !Wallet::verify_signature(&tx.sender, tx.hash.as_bytes(), &tx.signature) {
+            return Err(NodeError::Blockchain(format!("Invalid signature on tx {}", tx.hash)));
+        }
+
+        let sender_state = self.state.get(&tx.sender).ok_or_else(|| NodeError::Blockchain(format!("Sender {} not found", tx.sender)))?;
+
+        if sender_state.balance < tx.amount {
+            return Err(NodeError::Blockchain(format!("Insufficient funds for sender {}", tx.sender)));
+        }
+
+        if sender_state.nonce != tx.nonce {
+            return Err(NodeError::Blockchain(format!("Invalid nonce for sender {}. Expected: {}, got: {}", tx.sender, sender_state.nonce, tx.nonce)));
+        }
+
+        Ok(())
+    }
+}        let message = block.calculate_header_hash();
         if !Wallet::verify_signature(&block.header.validator_pubkey, message.as_bytes(), &block.signature) {
             println!("Validation Error: Invalid block signature.");
             return false;
