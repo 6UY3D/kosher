@@ -1,21 +1,23 @@
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey, Signature};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey, Signature, KeypairBytes};
 use rand::rngs::OsRng;
-use std::convert::TryInto;
+use std::fs;
+use std::path::Path;
+use crate::errors::NodeError;
 
-// A wallet holds the cryptographic keypair needed to sign data.
+/// A persistent wallet that can be saved to and loaded from disk.
 pub struct Wallet {
     keypair: SigningKey,
 }
 
 impl Wallet {
-    /// Creates a new wallet with a fresh keypair.
+    /// Creates a new, random wallet.
     pub fn new() -> Self {
         let mut csprng = OsRng;
         let keypair = SigningKey::generate(&mut csprng);
         Self { keypair }
     }
 
-    /// Signs a given message (e.g., a block hash).
+    /// Signs a given message with the wallet's private key.
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.keypair.sign(message)
     }
@@ -23,6 +25,34 @@ impl Wallet {
     /// Returns the public key as a hex string for identification.
     pub fn public_key_hex(&self) -> String {
         hex::encode(self.keypair.verifying_key().to_bytes())
+    }
+    
+    /// Loads a wallet from a keypair file. If the file doesn't exist,
+    /// it creates a new wallet and saves it to that path.
+    pub fn load_or_create(path: &Path) -> Result<Self, NodeError> {
+        if path.exists() {
+            let keypair_bytes: KeypairBytes = serde_json::from_str(
+                &fs::read_to_string(path)?
+            ).map_err(|e| NodeError::Config(format!("Failed to parse keypair file: {}", e)))?;
+            
+            let keypair = SigningKey::from_bytes(&keypair_bytes.secret_key);
+
+            println!("[Wallet] Loaded existing wallet from {}", path.display());
+            Ok(Self { keypair })
+        } else {
+            println!("[Wallet] No wallet found. Creating new wallet at {}", path.display());
+            let wallet = Self::new();
+            wallet.save(path)?;
+            Ok(wallet)
+        }
+    }
+    
+    /// Saves the wallet's keypair to a file.
+    pub fn save(&self, path: &Path) -> Result<(), NodeError> {
+        let keypair_bytes = self.keypair.to_keypair_bytes();
+        let json_bytes = serde_json::to_string_pretty(&keypair_bytes)?;
+        fs::write(path, json_bytes)?;
+        Ok(())
     }
 
     /// Verifies a signature given a public key, the original message, and the signature.
@@ -35,31 +65,11 @@ impl Wallet {
             Ok(arr) => arr,
             Err(_) => return false,
         };
-        let public_key = VerifyingKey::from_bytes(&pubkey_array).expect("Failed to create public key");
+        let public_key = match VerifyingKey::from_bytes(&pubkey_array) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
         
         public_key.verify_strict(message, signature).is_ok()
     }
-}    let mut rogue_block = Block {
-        header: BlockHeader {
-            id: previous_block.header.id + 1,
-            timestamp: chrono::Utc::now().timestamp(),
-            previous_hash: previous_block.calculate_header_hash(),
-            validator_pubkey: unauthorized_wallet.public_key_hex(),
-            transactions_hash: Block::hash_transactions(&rogue_transactions),
-        },
-        transactions: rogue_transactions,
-        signature: Signature::from_bytes(&[0; 64]).unwrap(),
-    };
-    let rogue_hash = rogue_block.calculate_header_hash();
-    rogue_block.signature = unauthorized_wallet.sign(rogue_hash.as_bytes());
-
-    match kosher_chain.add_block(rogue_block) {
-        Ok(_) => println!("✅ SUCCESS: Block added by rogue actor."),
-        Err(e) => eprintln!("❌ FAILURE: {}. Block was correctly rejected.", e),
-    }
-
-    println!("\nFinal block count: {}", kosher_chain.blocks.len());
-
-    // Save the updated chain
-    kosher_chain.save_to_file(CHAIN_FILE).unwrap();
 }
