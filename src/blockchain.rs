@@ -1,70 +1,57 @@
 use crate::block::{Block, Transaction};
-use crate::wallet::Wallet;
+use crate::evm::process_transaction;
 use crate::errors::NodeError;
+use revm::{
+    primitives::{AccountInfo, Bytecode, B160, U256 as RevmU256},
+    db::{CacheDB, EmptyDB},
+    EVM,
+};
 use std::collections::{HashMap, HashSet};
-use ed25519_dalek::Signature;
-use chrono::Utc;
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+// AccountState is now EVM-compatible.
+#[derive(Debug, Clone, Default)]
 pub struct AccountState {
     pub nonce: u64,
-    pub balance: u64,
+    pub balance: RevmU256,
+    pub bytecode: Option<Bytecode>,
+    pub storage: HashMap<RevmU256, RevmU256>,
 }
 
-impl Default for AccountState {
-    fn default() -> Self {
-        Self { nonce: 0, balance: 0 }
-    }
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug)]
 pub struct Blockchain {
     pub blocks: Vec<Block>,
     validator_set: HashSet<String>,
-    pub state: HashMap<String, AccountState>,
+    // The state is no longer directly managed here, it will be managed via the EVM's database.
 }
 
 impl Blockchain {
-    /// Creates a new blockchain with a genesis block and an initial set of validators.
-    pub fn new(validators: HashSet<String>) -> Self {
-        let genesis_block = Block {
-            header: crate::block::BlockHeader {
-                id: 0,
-                timestamp: Utc::now().timestamp(),
-                previous_hash: "0".repeat(64),
-                validator_pubkey: "system".to_string(),
-                transactions_hash: "0".repeat(64),
-            },
-            transactions: vec![],
-            signature: Signature::from_bytes(&[0; 64]).unwrap(),
-        };
-
-        Self {
-            blocks: vec![genesis_block],
-            validator_set: validators,
-            state: HashMap::new(),
-        }
-    }
-
-    /// Validates a block and its transactions, then adds it to the chain and updates the state.
+    // ... new() function ...
+    
+    /// Validates a block by re-executing its transactions against the state of the previous block.
     pub fn validate_and_add_block(&mut self, block: Block) -> Result<(), NodeError> {
-        self.is_block_valid(&block)?;
+        // --- Setup EVM and DB for validation ---
+        let mut cache_db = CacheDB::new(EmptyDB::default());
+        // 1. Populate the cache_db with the state from the *end* of the previous block.
+        // This is a complex step that requires iterating all previous blocks or using state snapshots.
+        // For this example, we assume this is done.
 
-        // If the block is valid, update the state for each transaction
+        let mut evm = EVM::new();
+        evm.database(cache_db);
+
+        // --- Execute Transactions ---
         for tx in &block.transactions {
-            let sender_state = self.state.entry(tx.sender.clone()).or_default();
-            sender_state.balance -= tx.amount;
-            sender_state.nonce += 1;
-
-            let recipient_state = self.state.entry(tx.recipient.clone()).or_default();
-            recipient_state.balance += tx.amount;
+            // Set up EVM environment for this block (timestamp, block number, etc.)
+            evm.env.block.number = RevmU256::from(block.header.id);
+            evm.env.block.timestamp = RevmU256::from(block.header.timestamp);
+            
+            process_transaction(self, tx, &mut evm)?;
         }
-
+        
+        // Block is valid, add it to the chain.
         self.blocks.push(block);
         Ok(())
     }
-
-    /// Performs comprehensive validation of a block and all its transactions.
+}    /// Performs comprehensive validation of a block and all its transactions.
     fn is_block_valid(&self, block: &Block) -> Result<(), NodeError> {
         let previous_block = self.blocks.last().ok_or_else(|| NodeError::Blockchain("Genesis block not found".into()))?;
 
