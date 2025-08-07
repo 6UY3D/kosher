@@ -8,6 +8,7 @@ pub struct Config {
     pub p2p: P2pConfig,
     pub witness: WitnessConfig,
     pub chain: ChainConfig,
+    pub validator: Option<ValidatorConfig>, // Validator config is optional
 }
 
 #[derive(Deserialize)]
@@ -18,7 +19,6 @@ pub struct ApiConfig {
 #[derive(Deserialize)]
 pub struct P2pConfig {
     pub listen_address: String,
-    // pub bootstrap_nodes: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -31,6 +31,11 @@ pub struct WitnessConfig {
 #[derive(Deserialize)]
 pub struct ChainConfig {
     pub validators_file: String,
+}
+
+#[derive(Deserialize)]
+pub struct ValidatorConfig {
+    pub key_file: String,
 }
 
 impl Config {
