@@ -18,3 +18,5 @@ axum = "0.7"
 # We also need to add the "full" feature to tokio if not already present
 tokio = { version = "1", features = ["full"] }
 xrpl-rust = "0.3"
+# Add this to your [dependencies] section
+tower-governor = "0.2"
