@@ -1,0 +1,22 @@
+# Rust dependency directory
+/target
+
+# Rust lock file
+Cargo.lock
+
+# IDE and editor directories
+.idea/
+.vscode/
+
+# Environment files
+.env
+
+# Build artifacts and logs
+*.log
+*.so
+*.a
+*.dll
+
+# OS-specific files
+.DS_Store
+Thumbs.db
