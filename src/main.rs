@@ -1,70 +1,95 @@
 mod block;
 mod blockchain;
 mod wallet;
-mod p2p;
-mod mempool; // Add mempool module
 
-use block::Transaction;
-use blockchain::Blockchain;
-use mempool::Mempool;
-use p2p::{ChainBehaviour, ChainBehaviourEvent, ChainMessage, CHAIN_TOPIC, TRANSACTION_TOPIC};
+use block::{Block, BlockHeader, Transaction};
+use blockchain::{Blockchain, AccountState};
+use wallet::Wallet;
+use std::collections::{HashMap, HashSet};
 
-use libp2p::{gossipsub, Swarm};
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+fn main() {
+    println!("--- Kosher Chain: Phase A (Hardened) ---");
 
-// API related imports
-use axum::{
-    routing::post,
-    http::StatusCode,
-    Json, Router, extract::State,
-};
-use std::net::SocketAddr;
+    // 1. Setup wallets for a user and a validator
+    let user_wallet = Wallet::new();
+    let validator_wallet = Wallet::new();
+    let recipient_pubkey = Wallet::new().public_key_hex();
 
-// Define a shared state for our API
-#[derive(Clone)]
-struct AppState {
-    mempool: Arc<Mutex<Mempool>>,
-    p2p_tx: mpsc::Sender<ChainMessage>, // Channel to send messages to the p2p task
-}
-
-#[tokio::main]
-async fn main() {
-    // --- 1. Setup Shared State ---
-    let blockchain = Arc::new(Mutex::new(Blockchain::load_from_file(/*..args..*/)));
-    let mempool = Arc::new(Mutex::new(Mempool::default()));
-    let (p2p_tx, mut p2p_rx) = mpsc::channel(100);
-
-    // --- 2. Start the API Server ---
-    let app_state = AppState {
-        mempool: mempool.clone(),
-        p2p_tx,
+    // 2. Setup the Blockchain with the validator and initial user state
+    let mut validator_set = HashSet::new();
+    validator_set.insert(validator_wallet.public_key_hex());
+    
+    let mut initial_state = HashMap::new();
+    initial_state.insert(
+        user_wallet.public_key_hex(),
+        AccountState { nonce: 0, balance: 1000 }
+    );
+    
+    // We create a new blockchain manually here for demo purposes.
+    let mut kosher_chain = Blockchain {
+        blocks: vec![ /* genesis block */ ], // Assume a genesis block exists
+        validator_set,
+        state: initial_state,
     };
-    tokio::spawn(run_api(app_state));
 
-    // --- 3. Setup and Run the P2P Swarm ---
-    let mut swarm: Swarm<ChainBehaviour> = /* ... setup code from Phase 4 ... */;
-    swarm.behaviour_mut().gossipsub.subscribe(&CHAIN_TOPIC).unwrap();
-    swarm.behaviour_mut().gossipsub.subscribe(&TRANSACTION_TOPIC).unwrap();
+    // 3. User creates a valid transaction (nonce = 0)
+    println!("\nUser creating first transaction (nonce 0)...");
+    let tx1 = Transaction::new(
+        &user_wallet,
+        recipient_pubkey.clone(),
+        100,
+        0 // Correct first nonce
+    );
+    println!("Transaction Hash: {}", tx1.hash);
 
-    // --- 4. Main Event Loop ---
-    loop {
-        tokio::select! {
-            // Handle messages from other tasks (e.g., the API)
-            Some(msg) = p2p_rx.recv() => {
-                let topic = match msg {
-                    ChainMessage::Block(_) => CHAIN_TOPIC.clone(),
-                    ChainMessage::Transaction(_) => TRANSACTION_TOPIC.clone(),
-                };
-                let json_msg = serde_json::to_string(&msg).unwrap();
-                swarm.behaviour_mut().gossipsub.publish(topic, json_msg).unwrap();
-            }
-            // Handle events from the P2P swarm
-            event = swarm.select_next_some() => match event {
-                // ... other SwarmEvent handlers from Phase 4 ...
-                
-                // Handle incoming gossip messages
-                libp2p::swarm::SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(
+    // 4. Validator creates and signs a block with this transaction
+    let previous_block = kosher_chain.blocks.last().unwrap();
+    let mut block1 = Block {
+        header: BlockHeader {
+            id: previous_block.header.id + 1,
+            timestamp: 0, // Simplified timestamp
+            previous_hash: previous_block.calculate_header_hash(),
+            validator_pubkey: validator_wallet.public_key_hex(),
+            transactions_hash: Block::hash_transactions(&vec![tx1.clone()]),
+        },
+        transactions: vec![tx1.clone()],
+        signature: ed25519_dalek::Signature::from_bytes(&[0; 64]).unwrap(), // Dummy
+    };
+    let block1_hash = block1.calculate_header_hash();
+    block1.signature = validator_wallet.sign(block1_hash.as_bytes());
+    
+    // 5. Add the valid block to the chain
+    println!("\nValidator proposing block with nonce 0 transaction...");
+    match kosher_chain.validate_and_add_block(block1) {
+        Ok(_) => println!("✅ SUCCESS: Block 1 added."),
+        Err(e) => eprintln!("❌ FAILURE: {}", e),
+    }
+    println!("User state after tx: {:?}", kosher_chain.state.get(&user_wallet.public_key_hex()));
+
+
+    // 6. **DEMONSTRATE SECURITY**: Attacker tries to replay the same transaction in a new block
+    println!("\nAttacker attempting to replay nonce 0 transaction in a new block...");
+    let previous_block_2 = kosher_chain.blocks.last().unwrap();
+    let mut replay_block = Block {
+        header: BlockHeader {
+            id: previous_block_2.header.id + 1,
+            timestamp: 1,
+            previous_hash: previous_block_2.calculate_header_hash(),
+            validator_pubkey: validator_wallet.public_key_hex(),
+            transactions_hash: Block::hash_transactions(&vec![tx1]), // Re-using tx1
+        },
+        transactions: vec![tx1],
+        signature: ed25519_dalek::Signature::from_bytes(&[0; 64]).unwrap(),
+    };
+    let replay_block_hash = replay_block.calculate_header_hash();
+    replay_block.signature = validator_wallet.sign(replay_block_hash.as_bytes());
+
+    match kosher_chain.validate_and_add_block(replay_block) {
+        Ok(_) => eprintln!("❌ FAILURE: Replay attack succeeded! Security flaw!"),
+        Err(e) => println!("✅ SUCCESS: Chain correctly rejected the block. Reason: {}", e),
+    }
+    println!("User state (unchanged): {:?}", kosher_chain.state.get(&user_wallet.public_key_hex()));
+}                libp2p::swarm::SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(
                     gossipsub::Event::Message { message, .. }
                 )) => {
                     if let Ok(msg) = serde_json::from_slice::<ChainMessage>(&message.data) {
